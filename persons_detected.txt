@@ -1,0 +1,1 @@
+ID: ee485000, Edad: 30, Género: Man, Raza: white, Emoción: sad, Tiempo en pantalla: 58 segundos
