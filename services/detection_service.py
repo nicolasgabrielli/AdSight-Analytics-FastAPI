@@ -36,7 +36,7 @@ class DetectionService:
         self.frame_queue = Queue(maxsize=1)
         self.lock = Lock()
         self.persons = {}
-        self.analysis_frequency = 2
+        self.analysis_frequency = 1
         self.last_result = None
         self.high_resolution = True
         
