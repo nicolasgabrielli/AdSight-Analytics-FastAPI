@@ -1,2 +1,11 @@
 Corre el backen en el puerto 8081
 uvicorn main:app --reload --port 8081
+
+Comando para iniciar, se ejecuta en otra cmd
+Invoke-WebRequest -Uri "http://127.0.0.1:8081/api/deteccion/iniciar" -Method POST
+
+Comando para detener
+Invoke-WebRequest -Uri "http://127.0.0.1:8081/api/deteccion/detener" -Method POST
+
+Comando para ver reporte
+Invoke-WebRequest -Uri "http://127.0.0.1:8081/api/deteccion/reporte" -Method GET
