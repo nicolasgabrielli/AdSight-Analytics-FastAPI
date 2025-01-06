@@ -343,7 +343,6 @@ class DetectionService:
                 try:
                     headers = {
                         "Content-Type": "application/json",
-                        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiaWF0IjoxNzEwMjY5NjI0LCJleHAiOjE3MTI4NjE2MjR9.YOl_PQtUhGDHUOmBub_dq_8EQtXOPKYtAFQtEXhXAYE"
                     }
 
                     # Ajustando el formato según la respuesta del backend
