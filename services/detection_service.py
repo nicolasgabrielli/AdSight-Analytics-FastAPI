@@ -33,12 +33,35 @@ class DetectionService:
     def __init__(self, video_source=0, high_resolution=True):
         self.stop_threads = False
         self.video_source = video_source
-        self.frame_queue = Queue(maxsize=4)
+        self.frame_queue = Queue(maxsize=1)
         self.lock = Lock()
         self.persons = {}
-        self.analysis_frequency = 4
+        self.analysis_frequency = 2
         self.last_result = None
-        self.high_resolution = high_resolution
+        self.high_resolution = True
+        
+        # Ajustar umbrales
+        self.confidence_thresholds = {
+            'gender': 0.65,
+            'race': 0.60,
+            'emotion': 0.40,
+            'age': 0.65
+        }
+        
+        self.temporal_window = 2
+        self.detection_history = {}
+        
+        # Mapeo de emociones
+        self.emotion_mapping = {
+            'happy': 'FELIZ',
+            'sad': 'TRISTE',
+            'angry': 'ENOJADO',
+            'fear': 'ASUSTADO',
+            'surprise': 'SORPRENDIDO',
+            'neutral': 'NEUTRAL',
+            'disgust': 'DISGUSTADO',
+            'contempt': 'DESPRECIO'
+        }
 
     def calculate_distance(self, coord1, coord2):
         return math.sqrt((coord1[0] - coord2[0]) ** 2 + (coord1[1] - coord2[1]) ** 2)
@@ -50,57 +73,58 @@ class DetectionService:
             current_time = time.time()
 
             with self.lock:
-                # Ignorar análisis que no contengan los datos necesarios
-                if not all(key in analysis for key in ['age', 'dominant_gender', 'dominant_race', 'dominant_emotion']):
-                    return None
-
-                # Buscar una persona existente que coincida con la posición
                 for person_id, data in self.persons.items():
                     center_existing = data["center"]
                     time_since_last_seen = current_time - data["last_seen"]
                     
-                    # Si han pasado más de 5 segundos, ignorar esta persona
-                    if time_since_last_seen > 5:
+                    if time_since_last_seen > 1:  # Reducido a 1 segundo
                         continue
                     
                     if self.calculate_distance(center_existing, center_new) < max_distance:
-                        # Actualizar datos de la persona existente
                         time_diff = current_time - data["last_seen"]
                         data["time_in_screen"] += time_diff
                         data["last_seen"] = current_time
                         data["center"] = center_new
+                        
+                        # Mantener solo las últimas 2 detecciones para edad
                         data["age"].append(analysis.get("age", 0))
-                        data["gender"][analysis.get("dominant_gender", "N/A")] += 1
-                        data["race"][analysis.get("dominant_race", "N/A")] = data["race"].get(analysis.get("dominant_race", "N/A"), 0) + 1
-                        data["emotion"][analysis.get("dominant_emotion", "N/A")] = data["emotion"].get(analysis.get("dominant_emotion", "N/A"), 0) + 1
+                        if len(data["age"]) > 2:
+                            data["age"].pop(0)
+                        
+                        # Actualizar emociones inmediatamente
+                        emotion = analysis.get("dominant_emotion", "N/A")
+                        data["emotion"] = {emotion: 1}  # Reset y actualizar directamente
+                        
+                        # Actualizar otros atributos normalmente
+                        gender = analysis.get("dominant_gender", "N/A")
+                        race = analysis.get("dominant_race", "N/A")
+                        
+                        data["gender"][gender] = data["gender"].get(gender, 0) + 1
+                        data["race"][race] = data["race"].get(race, 0) + 1
+                        
                         return person_id
 
-                # Limpiar personas que no se han visto en más de 5 segundos
+                # Limpiar personas que no se han visto en más de 1 segundo
                 expired_ids = [pid for pid, data in self.persons.items() 
-                             if current_time - data["last_seen"] > 5]
+                             if current_time - data["last_seen"] > 1]
                 for expired_id in expired_ids:
                     del self.persons[expired_id]
 
-                # Crear nueva persona
+                # Crear nueva persona con contadores inicializados
                 new_id = str(uuid.uuid4())
                 self.persons[new_id] = {
                     "center": center_new,
                     "time_in_screen": 0,
                     "last_seen": current_time,
                     "age": [analysis.get("age", 0)],
-                    "gender": {"Man": 0, "Woman": 0},
-                    "race": {},
-                    "emotion": {},
+                    "gender": {analysis.get("dominant_gender", "N/A"): 1},
+                    "race": {analysis.get("dominant_race", "N/A"): 1},
+                    "emotion": {analysis.get("dominant_emotion", "N/A"): 1}
                 }
-                self.persons[new_id]["gender"][analysis.get("dominant_gender", "N/A")] += 1
-                self.persons[new_id]["race"][analysis.get("dominant_race", "N/A")] = 1
-                self.persons[new_id]["emotion"][analysis.get("dominant_emotion", "N/A")] = 1
                 return new_id
-            
+
         except Exception as e:
-            error_str = str(e)
-            if not any(val in error_str.lower() for val in ['neutral', 'white', 'fear', 'sad']):
-                print(f"Error al asignar ID: {error_str}")
+            print(f"Error al asignar ID: {str(e)}")
             return None
 
     def capture_frames(self):
@@ -135,60 +159,89 @@ class DetectionService:
         vid.release()
         cv2.destroyAllWindows()
 
+    def validate_detection(self, analysis):
+        """Validar la confianza de la detección"""
+        if not analysis.get('confidence', 0) > self.confidence_thresholds['gender']:
+            return False
+            
+        return True
+
+    def smooth_predictions(self, person_id, current_prediction):
+        """Suavizar predicciones usando una ventana temporal"""
+        if person_id not in self.detection_history:
+            self.detection_history[person_id] = []
+            
+        history = self.detection_history[person_id]
+        history.append(current_prediction)
+        
+        # Mantener solo los últimos N frames
+        if len(history) > self.temporal_window:
+            history.pop(0)
+            
+        # Promediar predicciones
+        smoothed = {
+            'age': sum(h['age'] for h in history) / len(history),
+            'gender': max(set(h['gender'] for h in history), key=history.count),
+            'race': max(set(h['race'] for h in history), key=history.count),
+            'emotion': max(set(h['emotion'] for h in history), key=history.count)
+        }
+        
+        return smoothed
+
     def process_frames_hd(self):
         while not self.stop_threads:
             if not self.frame_queue.empty():
                 frame = self.frame_queue.get()
                 try:
-                    # Analizar directamente en 720p
+                    # Reducir resolución para mejor rendimiento pero mantener calidad
+                    processed_frame = cv2.resize(frame, (640, 360))  # 640p
+                    
+                    # Mejorar la calidad de la imagen
+                    processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                    
                     results = DeepFace.analyze(
-                        frame,
+                        processed_frame,
                         actions=['age', 'gender', 'race', 'emotion'],
-                        detector_backend="opencv",
+                        detector_backend="retinaface",
                         enforce_detection=False,
+                        align=True,
                         silent=True
                     )
                     
                     if isinstance(results, dict):
                         results = [results]
-                    elif not isinstance(results, list):
-                        results = []
 
-                    # Procesar cada detección
                     valid_results = []
                     for analysis in results:
                         region = analysis.get("region", {})
-                        # Validar que la región sea válida y no cubra más del 50% del frame
-                        if (region and 
-                            isinstance(region, dict) and 
-                            all(k in region for k in ['x', 'y', 'w', 'h'])):
+                        if region:
+                            # Ajustar el escalado para 640p
+                            scale_x = frame.shape[1] / 640
+                            scale_y = frame.shape[0] / 360
                             
-                            # Calcular el área del rostro y del frame
-                            frame_area = frame.shape[0] * frame.shape[1]
+                            region['x'] = int(region['x'] * scale_x)
+                            region['y'] = int(region['y'] * scale_y)
+                            region['w'] = int(region['w'] * scale_x)
+                            region['h'] = int(region['h'] * scale_y)
+                            
                             face_area = region['w'] * region['h']
+                            frame_area = frame.shape[0] * frame.shape[1]
                             
-                            # Si el área del rostro es menor al 30% del frame, es probablemente válida
-                            if face_area < (frame_area * 0.3):
-                                try:
-                                    person_id = self.assign_persistent_id(region, analysis)
-                                    if person_id:
-                                        valid_results.append(analysis)
-                                except Exception as e:
-                                    if not str(e).lower() in ['neutral', 'white', 'fear', 'sad']:
-                                        print(f"Error al asignar ID: {str(e)}")
-                    
+                            if 0.001 <= (face_area / frame_area) <= 0.5:
+                                person_id = self.assign_persistent_id(region, analysis)
+                                if person_id:
+                                    valid_results.append(analysis)
+
                     self.last_result = valid_results
                     
                 except Exception as e:
-                    error_str = str(e)
-                    if not any(val in error_str.lower() for val in ['neutral', 'white', 'fear', 'sad']):
-                        print(f"Error en análisis: {error_str}")
+                    print(f"Error en análisis: {str(e)}")
 
     def process_frames_sd(self):
         while not self.stop_threads:
             if not self.frame_queue.empty():
                 frame = self.frame_queue.get()
-                resized_frame = cv2.resize(frame, (320, 180))
+                resized_frame = cv2.resize(frame, (240, 135))
                 try:
                     results = DeepFace.analyze(
                         resized_frame,
@@ -253,11 +306,26 @@ class DetectionService:
                         continue
 
                     x, y, w, h = region.get("x", 0), region.get("y", 0), region.get("w", 0), region.get("h", 0)
+                    
+                    # Ajustar el centro para enfocarse en la cara
+                    center_x = x + w // 2
+                    center_y = y + h // 2  # Volver al centro real
+                    
+                    # Hacer el recuadro cuadrado y más grande
+                    size = int(max(w, h) * 1.2)  # Aumentar 20%
+                    
+                    # Ajustar posición para centrar en la cara
+                    x = max(0, center_x - size // 2)
+                    y = max(0, center_y - size // 2)
+                    
+                    # Asegurar que el recuadro no se salga del frame
+                    w = min(frame.shape[1] - x, size)
+                    h = min(frame.shape[0] - y, size)
 
-                    # Dibujar rectángulo alrededor del rostro
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    # Dibujar rectángulo con borde doble
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 0), 5)
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
 
-                    # Encontrar el ID persistente para esta detección
                     center_new = (x + w // 2, y + h // 2)
                     person_data = None
                     person_id = None
@@ -276,7 +344,6 @@ class DetectionService:
                         dominant_race = max(person_data["race"], key=person_data["race"].get) if person_data["race"] else "N/A"
                         dominant_emotion = max(person_data["emotion"], key=person_data["emotion"].get) if person_data["emotion"] else "N/A"
 
-                        # Preparar texto con toda la información
                         info_text = [
                             f"ID: {person_id[:8]}",
                             f"Tiempo: {round(person_data['time_in_screen'], 1)}s",
@@ -286,47 +353,39 @@ class DetectionService:
                             f"Emocion: {dominant_emotion}"
                         ]
 
-                        # Ajustar tamaño de fuente para 720p
-                        font_scale = 1.0  # Aumentado para mejor visibilidad en 720p
+                        # Posicionar el texto al lado del rectángulo
+                        text_x = x + w + 10
+                        text_y = y
+
+                        # Dibujar fondo semi-transparente para el texto
+                        overlay = frame.copy()
+                        text_padding = 20
+                        text_height = len(info_text) * 35
+                        cv2.rectangle(
+                            overlay,
+                            (text_x - text_padding, text_y - text_padding),
+                            (text_x + 300, text_y + text_height),
+                            (0, 0, 0),
+                            -1
+                        )
+                        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+                        # Dibujar texto con borde para mejor legibilidad
+                        font_scale = 0.8
                         font_thickness = 2
-                        padding = 10
-
-                        # Posicionar el texto encima del rectángulo
-                        text_y = y - padding - (len(info_text) * 30)  # Aumentado el espaciado
-                        if text_y < 0:  # Si está muy arriba, ponerlo debajo
-                            text_y = y + h + 30
-
-                        # Dibujar cada línea de texto con su fondo
                         for i, text in enumerate(info_text):
-                            text_pos_y = text_y + (i * 30)  # Aumentado el espaciado vertical
-                            
-                            # Obtener el tamaño del texto
-                            (text_width, text_height), _ = cv2.getTextSize(
-                                text, 
-                                cv2.FONT_HERSHEY_SIMPLEX, 
-                                font_scale, 
-                                font_thickness
-                            )
-                            
-                            # Dibujar rectángulo de fondo con padding
-                            cv2.rectangle(
-                                frame, 
-                                (x - padding, text_pos_y - text_height - padding),
-                                (x + text_width + padding, text_pos_y + padding),
-                                (0, 0, 0), 
-                                -1
-                            )
-                            
-                            # Dibujar texto
+                            text_pos_y = text_y + (i * 35) + 25
+                            # Borde negro
                             cv2.putText(
-                                frame, 
-                                text,
-                                (x, text_pos_y),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                font_scale, 
-                                (255, 255, 255), 
-                                font_thickness,
-                                cv2.LINE_AA
+                                frame, text, (text_x, text_pos_y),
+                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), 
+                                font_thickness + 2, cv2.LINE_AA
+                            )
+                            # Texto blanco
+                            cv2.putText(
+                                frame, text, (text_x, text_pos_y),
+                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255),
+                                font_thickness, cv2.LINE_AA
                             )
 
         except Exception as e:
